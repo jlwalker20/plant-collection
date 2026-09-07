@@ -57,3 +57,35 @@ img { display: block; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---- public gallery detail view ---- */
+.pg-detail { padding: 22px; }
+
+/* Photos fill the sheet rather than sitting in a cramped scroller — tapping a
+   card should always make the plant bigger, never smaller. */
+.pg-photos {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.pg-photos img {
+  width: 100%;
+  height: auto;
+  border-radius: 3px;
+  background: #e6e9df;
+}
+
+/* On a wide screen the first photo leads and the rest pair up beneath it. */
+@media (min-width: 760px) {
+  .pg-photos { grid-template-columns: 1fr 1fr; }
+  .pg-photos img:first-child { grid-column: 1 / -1; }
+}
+
+.pg-overlay { padding: 20px 12px; }
+
+/* On a phone the sheet takes the whole screen. */
+@media (max-width: 600px) {
+  .pg-overlay { padding: 0; }
+  .pg-detail { padding: 16px; border: none; border-radius: 0; min-height: 100vh; }
+}

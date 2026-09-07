@@ -54,7 +54,7 @@ export default function PublicGarden() {
         </p>
       </header>
 
-      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(205px, 1fr))" }}>
+      <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))" }}>
         {plants.map((p) => (
           <button
             key={p.id}
@@ -85,11 +85,11 @@ export default function PublicGarden() {
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto"
-          style={{ background: "rgba(23,37,28,0.5)", padding: "20px 10px" }}
+          className="pg-overlay fixed inset-0 z-50 flex items-start justify-center overflow-y-auto"
+          style={{ background: "rgba(23,37,28,0.5)" }}
           onClick={(e) => e.target === e.currentTarget && setOpen(null)}
         >
-          <div className="w-full" style={{ maxWidth: 620, background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4, padding: 22 }}>
+          <div className="pg-detail w-full" style={{ maxWidth: 820, background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4 }}>
             <div className="flex items-start justify-between gap-4 mb-4">
               <div>
                 <h2 style={{ fontFamily: serif, fontStyle: "italic", fontSize: 24, margin: 0, color: C.ink }}>
@@ -111,9 +111,9 @@ export default function PublicGarden() {
                 Close
               </button>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="pg-photos">
               {open.photos.map((src, i) => (
-                <img key={i} src={src} alt="" style={{ width: 240, borderRadius: 2, flexShrink: 0 }} />
+                <img key={i} src={src} alt={open.common || open.scientific} loading={i === 0 ? "eager" : "lazy"} />
               ))}
             </div>
           </div>
