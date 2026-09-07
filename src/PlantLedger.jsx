@@ -83,7 +83,7 @@ function thumbFrom(dataUrl) {
     const img = new Image();
     img.onerror = () => resolve("");
     img.onload = () => {
-      const scale = Math.min(1, 320 / Math.max(img.width, img.height));
+      const scale = Math.min(1, 640 / Math.max(img.width, img.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
@@ -285,6 +285,33 @@ export default function PlantLedger({ account, onSignOut }) {
     setSection("collection");
     setOpenId(plant.id);
     flash("Moved into the collection.");
+  };
+
+  // Covers are only made when photos change, so older entries keep whatever
+  // size was current when they were added. This re-cuts them all at once.
+  const rebuildThumbnails = async () => {
+    const nextPlants = [];
+    for (const p of plants) {
+      if (!p.photoCount) {
+        nextPlants.push(p);
+        continue;
+      }
+      const shots = await getJson(photoKey(p.id), false, []);
+      nextPlants.push(shots.length ? { ...p, cover: await thumbFrom(shots[0]) } : p);
+    }
+    await persist(nextPlants);
+
+    const nextWish = [];
+    for (const w of wishlist) {
+      if (!w.photoCount) {
+        nextWish.push(w);
+        continue;
+      }
+      const shots = await getJson(wishPhotoKey(w.id), false, []);
+      nextWish.push(shots.length ? { ...w, cover: await thumbFrom(shots[0]) } : w);
+    }
+    await persistWish(nextWish);
+    flash("Thumbnails rebuilt.");
   };
 
   const upsertPlant = async (plant) => {
@@ -632,6 +659,7 @@ export default function PlantLedger({ account, onSignOut }) {
           account={account}
           onSignOut={onSignOut}
           publicCount={plants.filter((p) => p.publicOn).length}
+          onRebuildThumbnails={rebuildThumbnails}
           onPublish={async (opts) => {
             const snap = await buildSnapshot(plants, opts);
             await publish(snap);
@@ -1262,12 +1290,13 @@ function PlantForm({ initial, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublish, onUnpublish, onClose, onBackup, onRestore }) {
+function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublish, onUnpublish, onRebuildThumbnails, onClose, onBackup, onRestore }) {
   const [restoreText, setRestoreText] = useState("");
   const [title, setTitle] = useState("The Living Collection");
   const [blurb, setBlurb] = useState("");
   const [showRooms, setShowRooms] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
   const gardenUrl = `${window.location.origin}${window.location.pathname}#/garden`;
   const pct = Math.min(100, Math.round((usedBytes / SOFT_LIMIT) * 100));
 
@@ -1296,6 +1325,22 @@ function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublis
           {fmtBytes(usedBytes)} in the shared collection, almost all of it photos. The free Supabase tier holds 500 MB,
           which is well over a thousand pictures.
         </p>
+
+        <div className="mb-6">
+          <Btn
+            disabled={rebuilding}
+            onClick={async () => {
+              setRebuilding(true);
+              await onRebuildThumbnails();
+              setRebuilding(false);
+            }}
+          >
+            {rebuilding ? "Rebuilding…" : "Rebuild thumbnails"}
+          </Btn>
+          <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "6px 0 0" }}>
+            Re-cuts every cover image at full quality. Worth running once after an update that changes thumbnail size.
+          </p>
+        </div>
 
         <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Public view</h3>
         <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 10px" }}>
