@@ -1,0 +1,24 @@
+# Free Supabase projects pause after 7 days without a database request.
+# This pings the database every 3 days so the app is never asleep when you
+# reach for it. It costs a couple of seconds of Actions time a week.
+#
+# Note: GitHub disables scheduled workflows in repositories with no activity
+# for 60 days. If you don't commit anything for two months, re-enable it from
+# the Actions tab.
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Touch the database
+        run: |
+          curl -sS -o /dev/null -w "%{http_code}\n" \
+            "${{ secrets.VITE_SUPABASE_URL }}/rest/v1/collection_kv?select=key&limit=1" \
+            -H "apikey: ${{ secrets.VITE_SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.VITE_SUPABASE_ANON_KEY }}"
