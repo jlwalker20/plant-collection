@@ -1,9 +1,11 @@
+# Builds the app and publishes it to GitHub Pages on every push to main.
+# You don't need Node or any tooling on your own machine — GitHub does the build.
 name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+  workflow_dispatch: # lets you trigger a rebuild by hand from the Actions tab
 
 permissions:
   contents: read
@@ -27,9 +29,16 @@ jobs:
 
       - run: npm ci
 
+      # Pages serves the site from /<repo-name>/, so the build needs that prefix.
+      # Taken from the repo name automatically — nothing to edit.
       - run: npm run build
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
+          # Set these in Settings → Secrets and variables → Actions.
+          # The anon key is meant to ship in the browser bundle; Row Level
+          # Security is what actually protects the data.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
