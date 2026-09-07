@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { getJson, setJson, delKey, requestPersistence } from "./storage.js";
+import { buildSnapshot, publish, unpublish } from "./publish.js";
 
 /* ------------------------------------------------------------------ */
 /*  palette + type                                                     */
@@ -21,6 +22,7 @@ const sans = "'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif";
 const INDEX_KEY = "plantdex:index:v1";
 const WISH_KEY = "plantdex:wishlist:v1";
 const photoKey = (id) => `plantdex:photos:${id}`;
+const wishPhotoKey = (id) => `plantdex:wishphotos:${id}`;
 const SOFT_LIMIT = 400 * 1024 * 1024; // a courtesy warning, not a hard ceiling
 
 const PRIORITIES = ["Next purchase", "Watching", "Someday"];
@@ -81,12 +83,12 @@ function thumbFrom(dataUrl) {
     const img = new Image();
     img.onerror = () => resolve("");
     img.onload = () => {
-      const scale = Math.min(1, 150 / Math.max(img.width, img.height));
+      const scale = Math.min(1, 320 / Math.max(img.width, img.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", 0.65));
+      resolve(canvas.toDataURL("image/jpeg", 0.72));
     };
     img.src = dataUrl;
   });
@@ -196,7 +198,7 @@ function Modal({ children, onClose, wide }) {
 /* ------------------------------------------------------------------ */
 /*  app                                                                */
 /* ------------------------------------------------------------------ */
-export default function PlantLedger() {
+export default function PlantLedger({ account, onSignOut }) {
   const [plants, setPlants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
@@ -266,11 +268,17 @@ export default function PlantLedger() {
       location: item.room || "",
       notes: item.notes ? [{ id: uid(), date: today(), tag: "", text: item.notes }] : [],
       props: [],
-      photoCount: 0,
-      cover: "",
-      bytes: 0,
-      added: today(),
+      photoCount: item.photoCount || 0,
+      cover: item.cover || "",
+      bytes: item.bytes || 0,
+      publicOn: false,
     };
+    // Photos taken while it was on the wishlist come with it.
+    if (item.photoCount) {
+      const shots = await getJson(wishPhotoKey(item.id), false, []);
+      if (shots.length) await setJson(photoKey(plant.id), shots, false).catch(() => {});
+      await delKey(wishPhotoKey(item.id)).catch(() => {});
+    }
     await persist([...plants, plant]);
     await persistWish(wishlist.filter((w) => w.id !== item.id));
     setEditingWish(null);
@@ -367,7 +375,7 @@ export default function PlantLedger() {
       head = ["Common name", "Scientific name", "First seen", "Where it would go", "Source or seller", "Priority", "Notes"];
       body = wishRows.map((w) => [w.common || "", w.scientific || "", w.seen || "", w.room || "", w.source || "", w.priority || "", w.notes || ""]);
     } else {
-      head = ["Common name", "Scientific name", "Acquired", "Room", "Last care note", "Latest status", "Propagations", "Photos"];
+      head = ["Common name", "Scientific name", "Date added", "Room", "Last care note", "Latest status", "Propagations", "Photos"];
       body = filtered.map((p) => {
         const n = latestNote(p);
         return [
@@ -606,8 +614,10 @@ export default function PlantLedger() {
             await upsertWish(item);
             setEditingWish(null);
           }}
+          flash={flash}
           onDelete={async (id) => {
             await persistWish(wishlist.filter((w) => w.id !== id));
+            await delKey(wishPhotoKey(id)).catch(() => {});
             setEditingWish(null);
             flash("Removed from the wishlist.");
           }}
@@ -619,6 +629,18 @@ export default function PlantLedger() {
         <Settings
           plants={plants}
           usedBytes={usedBytes}
+          account={account}
+          onSignOut={onSignOut}
+          publicCount={plants.filter((p) => p.publicOn).length}
+          onPublish={async (opts) => {
+            const snap = await buildSnapshot(plants, opts);
+            await publish(snap);
+            flash(`Published ${snap.count} ${snap.count === 1 ? "plant" : "plants"}.`);
+          }}
+          onUnpublish={async () => {
+            await unpublish();
+            flash("Public view emptied.");
+          }}
           onClose={() => setSettings(false)}
           onBackup={() => download(JSON.stringify({ version: 2, exported: today(), plants, wishlist }, null, 2), "plant-collection-backup.json", "application/json")}
           onRestore={async (list, wl) => {
@@ -673,7 +695,7 @@ function Ledger({ rows, sort, setSort, onOpen }) {
   const cols = [
     { key: "common", label: "Common name" },
     { key: "scientific", label: "Scientific name" },
-    { key: "acquired", label: "Acquired" },
+    { key: "acquired", label: "Added" },
     { key: "location", label: "Room" },
     { key: "lastNote", label: "Last note" },
     { key: "statusTag", label: "Latest status", sortable: false },
@@ -718,9 +740,9 @@ function Ledger({ rows, sort, setSort, onOpen }) {
                 <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 14 }}>
                   <span className="flex items-center gap-2">
                     {p.cover ? (
-                      <img src={p.cover} alt="" style={{ width: 26, height: 26, objectFit: "cover", borderRadius: 2, flexShrink: 0 }} />
+                      <img src={p.cover} alt="" style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 2, flexShrink: 0 }} />
                     ) : (
-                      <span style={{ width: 26, height: 26, borderRadius: 2, border: `1px solid ${C.rule}`, flexShrink: 0 }} />
+                      <span style={{ width: 44, height: 44, borderRadius: 2, border: `1px solid ${C.rule}`, flexShrink: 0 }} />
                     )}
                     {p.common || "Unnamed"}
                   </span>
@@ -794,14 +816,13 @@ function Sheets({ rows, onOpen }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  detail sheet — a summary first, editing behind buttons             */
+/* ------------------------------------------------------------------ */
 function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPatch, onSpinOff, flash }) {
   const [photos, setPhotos] = useState(null);
   const [busy, setBusy] = useState(false);
   const [zoom, setZoom] = useState(null);
-  const [noteText, setNoteText] = useState("");
-  const [noteTag, setNoteTag] = useState("");
-  const [noteDate, setNoteDate] = useState(today());
-  const [prop, setProp] = useState({ started: today(), method: "", count: "1", notes: "" });
+  const [panel, setPanel] = useState(null); // "care" | "prop"
   const [confirmDelete, setConfirmDelete] = useState(false);
   const fileRef = useRef(null);
 
@@ -822,14 +843,12 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
       await onPatch({ photoCount: next.length, cover, bytes: JSON.stringify(next).length });
     } catch (e) {
       setPhotos(prev);
-      flash("Photos didn't save. Your device may be low on storage.");
+      flash("Photos didn't save. Check your connection.");
     }
   };
 
   const addPhotos = async (files) => {
-    if (usedBytes > SOFT_LIMIT) {
-      flash("This collection is getting large. Consider trimming older photos.");
-    }
+    if (usedBytes > SOFT_LIMIT) flash("This collection is getting large. Consider trimming older photos.");
     setBusy(true);
     try {
       const added = [];
@@ -843,27 +862,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
 
   const notes = (plant.notes || []).slice().sort((a, b) => (a.date < b.date ? 1 : -1));
   const props = (plant.props || []).slice().sort((a, b) => (a.started < b.started ? 1 : -1));
-
-  const addNote = async () => {
-    if (!noteText.trim() && !noteTag.trim()) return;
-    await onPatch({
-      notes: [...(plant.notes || []), { id: uid(), date: noteDate, tag: noteTag.trim(), text: noteText.trim() }],
-    });
-    setNoteText("");
-    setNoteTag("");
-    setNoteDate(today());
-  };
-
-  const addProp = async () => {
-    if (!prop.method.trim()) return;
-    await onPatch({
-      props: [
-        ...(plant.props || []),
-        { id: uid(), started: prop.started, method: prop.method.trim(), count: prop.count || "1", notes: prop.notes.trim(), potted: "" },
-      ],
-    });
-    setProp({ started: today(), method: "", count: "1", notes: "" });
-  };
+  const newest = latestNote(plant);
 
   const spinOff = (pr) => {
     onSpinOff({
@@ -878,7 +877,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
       cover: "",
       bytes: 0,
       parent: plant.common || plant.scientific || "",
-      added: today(),
+      publicOn: false,
     });
   };
 
@@ -898,6 +897,13 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           <Btn onClick={onClose}>Close</Btn>
         </div>
 
+        {/* the three actions, right under the name */}
+        <div className="flex flex-wrap gap-2" style={{ margin: "16px 0 4px" }}>
+          <Btn onClick={onEdit}>Edit details</Btn>
+          <Btn tone="solid" onClick={() => setPanel("care")}>Care entry</Btn>
+          <Btn onClick={() => setPanel("prop")}>New prop</Btn>
+        </div>
+
         <dl
           className="grid gap-x-6 gap-y-2 my-5"
           style={{
@@ -910,7 +916,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           }}
         >
           <div>
-            <dt style={{ fontSize: 12, color: C.moss }}>Acquired</dt>
+            <dt style={{ fontSize: 12, color: C.moss }}>Date added</dt>
             <dd style={{ margin: 0 }}>{fmtDate(plant.acquired)}</dd>
           </div>
           <div>
@@ -918,12 +924,12 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
             <dd style={{ margin: 0 }}>{plant.location || "—"}</dd>
           </div>
           <div>
-            <dt style={{ fontSize: 12, color: C.moss }}>Added to deck</dt>
-            <dd style={{ margin: 0 }}>{fmtDate(plant.added)}</dd>
+            <dt style={{ fontSize: 12, color: C.moss }}>Last care note</dt>
+            <dd style={{ margin: 0 }}>{fmtDate(newest ? newest.date : "")}</dd>
           </div>
           <div>
             <dt style={{ fontSize: 12, color: C.moss }}>Latest status</dt>
-            <dd style={{ margin: 0 }}>{latestNote(plant) && latestNote(plant).tag ? latestNote(plant).tag : "—"}</dd>
+            <dd style={{ margin: 0 }}>{newest && newest.tag ? newest.tag : "—"}</dd>
           </div>
         </dl>
 
@@ -983,35 +989,12 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           )}
         </div>
 
-        {/* care journal */}
+        {/* care journal — read only here */}
         <div className="mb-7">
-          <h3 style={{ fontFamily: serif, fontSize: 18, margin: "0 0 4px" }}>Care journal</h3>
-          <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "0 0 10px" }}>
-            Health and status live here — tag an entry and the newest tag shows in the ledger.
-          </p>
-          <div className="flex flex-wrap gap-2 items-start mb-4">
-            <input type="date" value={noteDate} onChange={(e) => setNoteDate(e.target.value)} style={{ ...inputStyle, width: 145 }} />
-            <input
-              list="status-tags"
-              value={noteTag}
-              onChange={(e) => setNoteTag(e.target.value)}
-              placeholder="Status"
-              style={{ ...inputStyle, width: 130 }}
-            />
-            <datalist id="status-tags">
-              {STATUS_TAGS.map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
-            <textarea
-              value={noteText}
-              onChange={(e) => setNoteText(e.target.value)}
-              placeholder="Two new roots on the wet stick. Moved further from the radiator."
-              style={{ ...inputStyle, flex: "1 1 240px", minHeight: 60, resize: "vertical" }}
-            />
-            <Btn tone="solid" onClick={addNote} disabled={!noteText.trim() && !noteTag.trim()}>Save entry</Btn>
+          <div className="flex items-baseline justify-between mb-2">
+            <h3 style={{ fontFamily: serif, fontSize: 18, margin: 0 }}>Care journal</h3>
+            <Btn tone="link" onClick={() => setPanel("care")}>Add entry</Btn>
           </div>
-
           {notes.length === 0 ? (
             <p style={{ fontFamily: sans, fontSize: 13, color: C.sage }}>No entries yet.</p>
           ) : (
@@ -1032,35 +1015,12 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           )}
         </div>
 
-        {/* propagations */}
+        {/* propagations — read only here */}
         <div>
-          <h3 style={{ fontFamily: serif, fontSize: 18, margin: "0 0 4px" }}>Propagations</h3>
-          <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "0 0 10px" }}>
-            Cuttings taken off this plant. When one roots and gets potted, give it its own card.
-          </p>
-          <div className="flex flex-wrap gap-2 items-start mb-4">
-            <input type="date" value={prop.started} onChange={(e) => setProp({ ...prop, started: e.target.value })} style={{ ...inputStyle, width: 145 }} />
-            <input
-              value={prop.method}
-              onChange={(e) => setProp({ ...prop, method: e.target.value })}
-              placeholder="Node cutting in water"
-              style={{ ...inputStyle, width: 190 }}
-            />
-            <input
-              value={prop.count}
-              onChange={(e) => setProp({ ...prop, count: e.target.value })}
-              placeholder="How many"
-              style={{ ...inputStyle, width: 95 }}
-            />
-            <input
-              value={prop.notes}
-              onChange={(e) => setProp({ ...prop, notes: e.target.value })}
-              placeholder="Notes"
-              style={{ ...inputStyle, flex: "1 1 180px" }}
-            />
-            <Btn tone="solid" onClick={addProp} disabled={!prop.method.trim()}>Log cutting</Btn>
+          <div className="flex items-baseline justify-between mb-2">
+            <h3 style={{ fontFamily: serif, fontSize: 18, margin: 0 }}>Propagations</h3>
+            <Btn tone="link" onClick={() => setPanel("prop")}>Log a cutting</Btn>
           </div>
-
           {props.length === 0 ? (
             <p style={{ fontFamily: sans, fontSize: 13, color: C.sage }}>Nothing propagating right now.</p>
           ) : (
@@ -1077,12 +1037,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
                     {pr.potted && <Tag>Potted {fmtDate(pr.potted)}</Tag>}
                     <span className="ml-auto flex gap-2">
                       {!pr.potted && (
-                        <Btn
-                          tone="link"
-                          onClick={() =>
-                            onPatch({ props: plant.props.map((x) => (x.id === pr.id ? { ...x, potted: today() } : x)) })
-                          }
-                        >
+                        <Btn tone="link" onClick={() => onPatch({ props: plant.props.map((x) => (x.id === pr.id ? { ...x, potted: today() } : x)) })}>
                           Mark potted
                         </Btn>
                       )}
@@ -1090,9 +1045,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
                       <Btn tone="danger" onClick={() => onPatch({ props: plant.props.filter((x) => x.id !== pr.id) })}>Delete</Btn>
                     </span>
                   </div>
-                  {pr.notes && (
-                    <p style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "4px 0 0 100px" }}>{pr.notes}</p>
-                  )}
+                  {pr.notes && <p style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "4px 0 0 100px" }}>{pr.notes}</p>}
                 </li>
               ))}
             </ul>
@@ -1100,7 +1053,10 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
         </div>
 
         <div className="flex items-center justify-between mt-7 pt-4" style={{ borderTop: `1px solid ${C.rule}` }}>
-          <Btn onClick={onEdit}>Edit details</Btn>
+          <label className="flex items-center gap-2" style={{ fontFamily: sans, fontSize: 13, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!plant.publicOn} onChange={(e) => onPatch({ publicOn: e.target.checked })} />
+            Show in the public view
+          </label>
           {confirmDelete ? (
             <span className="flex items-center gap-2" style={{ fontFamily: sans, fontSize: 13 }}>
               Remove this plant and its photos?
@@ -1113,6 +1069,26 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
         </div>
       </div>
 
+      {panel === "care" && (
+        <CareEntryForm
+          onCancel={() => setPanel(null)}
+          onSave={async (entry) => {
+            await onPatch({ notes: [...(plant.notes || []), entry] });
+            setPanel(null);
+          }}
+        />
+      )}
+
+      {panel === "prop" && (
+        <PropForm
+          onCancel={() => setPanel(null)}
+          onSave={async (entry) => {
+            await onPatch({ props: [...(plant.props || []), entry] });
+            setPanel(null);
+          }}
+        />
+      )}
+
       {zoom && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center"
@@ -1122,6 +1098,110 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           <img src={zoom} alt="" style={{ maxWidth: "92%", maxHeight: "92%", borderRadius: 3 }} />
         </div>
       )}
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function CareEntryForm({ onCancel, onSave }) {
+  const [date, setDate] = useState(today());
+  const [tag, setTag] = useState("");
+  const [text, setText] = useState("");
+
+  return (
+    <Modal onClose={onCancel}>
+      <div style={{ padding: 22 }}>
+        <h2 style={{ fontFamily: serif, fontSize: 22, margin: "0 0 4px" }}>Care entry</h2>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "0 0 18px" }}>
+          Health and status live here — the newest tag shows in the ledger.
+        </p>
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+          <Field label="Date">
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+          </Field>
+          <Field label="Status" hint="optional">
+            <input list="status-tags" value={tag} onChange={(e) => setTag(e.target.value)} placeholder="Thriving" style={inputStyle} />
+            <datalist id="status-tags">
+              {STATUS_TAGS.map((t) => (
+                <option key={t} value={t} />
+              ))}
+            </datalist>
+          </Field>
+        </div>
+
+        <Field label="What you did or noticed">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Two new roots on the wet stick. Moved further from the radiator."
+            style={{ ...inputStyle, minHeight: 90, resize: "vertical" }}
+          />
+        </Field>
+
+        <div className="flex justify-end gap-2 mt-2">
+          <Btn onClick={onCancel}>Cancel</Btn>
+          <Btn
+            tone="solid"
+            disabled={!text.trim() && !tag.trim()}
+            onClick={() => onSave({ id: uid(), date, tag: tag.trim(), text: text.trim() })}
+          >
+            Save entry
+          </Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function PropForm({ onCancel, onSave }) {
+  const [started, setStarted] = useState(today());
+  const [method, setMethod] = useState("");
+  const [count, setCount] = useState("1");
+  const [notes, setNotes] = useState("");
+
+  return (
+    <Modal onClose={onCancel}>
+      <div style={{ padding: 22 }}>
+        <h2 style={{ fontFamily: serif, fontSize: 22, margin: "0 0 4px" }}>New propagation</h2>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "0 0 18px" }}>
+          A cutting taken off this plant. Mark it potted later, or give it its own card.
+        </p>
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
+          <Field label="Started">
+            <input type="date" value={started} onChange={(e) => setStarted(e.target.value)} style={inputStyle} />
+          </Field>
+          <Field label="How many">
+            <input value={count} onChange={(e) => setCount(e.target.value)} placeholder="2" style={inputStyle} />
+          </Field>
+        </div>
+
+        <Field label="Method">
+          <input value={method} onChange={(e) => setMethod(e.target.value)} placeholder="Node cuttings in water" style={inputStyle} />
+        </Field>
+
+        <Field label="Notes" hint="optional">
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Both have a visible root nub. Keeping them on the warm shelf."
+            style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+          />
+        </Field>
+
+        <div className="flex justify-end gap-2 mt-2">
+          <Btn onClick={onCancel}>Cancel</Btn>
+          <Btn
+            tone="solid"
+            disabled={!method.trim()}
+            onClick={() => onSave({ id: uid(), started, method: method.trim(), count: count || "1", notes: notes.trim(), potted: "" })}
+          >
+            Log cutting
+          </Btn>
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -1140,7 +1220,6 @@ function PlantForm({ initial, onCancel, onSave }) {
       photoCount: 0,
       cover: "",
       bytes: 0,
-      added: today(),
     }
   );
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -1161,7 +1240,7 @@ function PlantForm({ initial, onCancel, onSave }) {
           />
         </Field>
         <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))" }}>
-          <Field label="Acquired">
+          <Field label="Date added" hint="when it joined the collection">
             <input type="date" value={f.acquired} onChange={set("acquired")} style={inputStyle} />
           </Field>
           <Field label="Room" hint="used for grouping">
@@ -1183,8 +1262,13 @@ function PlantForm({ initial, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Settings({ plants, usedBytes, onClose, onBackup, onRestore }) {
+function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublish, onUnpublish, onClose, onBackup, onRestore }) {
   const [restoreText, setRestoreText] = useState("");
+  const [title, setTitle] = useState("The Living Collection");
+  const [blurb, setBlurb] = useState("");
+  const [showRooms, setShowRooms] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const gardenUrl = `${window.location.origin}${window.location.pathname}#/garden`;
   const pct = Math.min(100, Math.round((usedBytes / SOFT_LIMIT) * 100));
 
   const doRestore = () => {
@@ -1209,15 +1293,76 @@ function Settings({ plants, usedBytes, onClose, onBackup, onRestore }) {
           <div style={{ width: `${pct}%`, height: "100%", background: pct > 85 ? C.warn : C.moss }} />
         </div>
         <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 22px" }}>
-          {fmtBytes(usedBytes)} on this device, almost all of it photos. There's no fixed ceiling — Android grants
-          storage from free disk space — so the bar is a rough sense of scale, not a limit.
+          {fmtBytes(usedBytes)} in the shared collection, almost all of it photos. The free Supabase tier holds 500 MB,
+          which is well over a thousand pictures.
         </p>
+
+        <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Public view</h3>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 10px" }}>
+          Publishing writes a separate, read-only copy of the {publicCount} {publicCount === 1 ? "plant" : "plants"} you've
+          ticked on their sheets. Names, dates, and up to three photos each — never rooms unless you allow it, and never
+          your wishlist, sources, or propagation notes. Nothing changes out there until you press Publish.
+        </p>
+
+        <Field label="Title">
+          <input value={title} onChange={(e) => setTitle(e.target.value)} style={inputStyle} />
+        </Field>
+        <Field label="Short introduction" hint="optional">
+          <textarea
+            value={blurb}
+            onChange={(e) => setBlurb(e.target.value)}
+            placeholder="A few of the plants we keep, and when they arrived."
+            style={{ ...inputStyle, minHeight: 56, resize: "vertical" }}
+          />
+        </Field>
+        <label className="flex items-center gap-2 mb-3" style={{ fontFamily: sans, fontSize: 13, cursor: "pointer" }}>
+          <input type="checkbox" checked={showRooms} onChange={(e) => setShowRooms(e.target.checked)} />
+          Include which room each plant lives in
+        </label>
+
+        <div className="flex flex-wrap gap-2 items-center mb-2">
+          <Btn
+            tone="solid"
+            disabled={publishing || publicCount === 0}
+            onClick={async () => {
+              setPublishing(true);
+              try {
+                await onPublish({ title, blurb, showRooms });
+              } catch (e) {
+                alert("Publishing failed. Check your connection and try again.");
+              }
+              setPublishing(false);
+            }}
+          >
+            {publishing ? "Publishing…" : `Publish ${publicCount || ""}`}
+          </Btn>
+          <Btn onClick={() => onUnpublish().catch(() => alert("Couldn't empty the public view."))}>Take it down</Btn>
+        </div>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "0 0 6px", wordBreak: "break-all" }}>
+          {gardenUrl}
+        </p>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 22px" }}>
+          Anyone with that link can view it — there's no half-public. Tick plants on their individual sheets, then
+          publish again to update.
+        </p>
+
+        {account && (
+          <>
+            <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Account</h3>
+            <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 10px" }}>
+              Signed in as {account}. This collection is shared — whoever saves last wins, so avoid editing the same
+              plant at the same moment.
+            </p>
+            <div className="mb-6">
+              <Btn onClick={onSignOut}>Sign out</Btn>
+            </div>
+          </>
+        )}
 
         <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Backup</h3>
         <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 10px" }}>
-          Everything lives on this device only. Clearing this site's browser data, or uninstalling, takes the collection
-          with it — so export now and then. The file holds every plant, note, propagation, and wishlist entry; photos
-          aren't included.
+          The free Supabase tier keeps no backups of its own, so export occasionally. The file holds every plant, note,
+          propagation, and wishlist entry; photos aren't included.
         </p>
         <div className="flex flex-wrap gap-2 items-center mb-3">
           <Btn onClick={onBackup} disabled={!plants.length}>Download backup</Btn>
@@ -1252,7 +1397,7 @@ function EmptyWish({ onAdd }) {
 
 /* ------------------------------------------------------------------ */
 function Wishlist({ rows, onEdit, onAcquire }) {
-  const cols = ["Common name", "Scientific name", "First seen", "Where it would go", "Source or seller", "Priority", ""];
+  const cols = ["", "Common name", "Scientific name", "First seen", "Where it would go", "Source or seller", "Priority", ""];
   return (
     <div style={{ overflowX: "auto", background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4 }}>
       <table style={{ width: "100%", minWidth: 800, borderCollapse: "collapse" }}>
@@ -1280,6 +1425,13 @@ function Wishlist({ rows, onEdit, onAcquire }) {
         <tbody>
           {rows.map((w) => (
             <tr key={w.id} style={{ borderBottom: `1px solid ${C.rule}` }}>
+              <td onClick={() => onEdit(w)} style={{ padding: "9px 13px", cursor: "pointer", width: 60 }}>
+                {w.cover ? (
+                  <img src={w.cover} alt="" style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 2 }} />
+                ) : (
+                  <span style={{ display: "block", width: 44, height: 44, borderRadius: 2, border: `1px solid ${C.rule}` }} />
+                )}
+              </td>
               <td onClick={() => onEdit(w)} style={{ padding: "9px 13px", fontFamily: sans, fontSize: 14, cursor: "pointer" }}>
                 {w.common || "Unnamed"}
               </td>
@@ -1309,11 +1461,50 @@ function Wishlist({ rows, onEdit, onAcquire }) {
 }
 
 /* ------------------------------------------------------------------ */
-function WishForm({ initial, onCancel, onSave, onDelete, onAcquire }) {
+function WishForm({ initial, onCancel, onSave, onDelete, onAcquire, flash }) {
   const [f, setF] = useState(
-    initial || { id: uid(), common: "", scientific: "", seen: today(), room: "", source: "", priority: "Someday", notes: "" }
+    initial || { id: uid(), common: "", scientific: "", seen: today(), room: "", source: "", priority: "Someday", notes: "", photoCount: 0, cover: "", bytes: 0 }
   );
+  const [photos, setPhotos] = useState(initial ? null : []);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  useEffect(() => {
+    if (!initial) return;
+    let alive = true;
+    getJson(wishPhotoKey(initial.id), false, []).then((ps) => alive && setPhotos(Array.isArray(ps) ? ps : []));
+    return () => {
+      alive = false;
+    };
+  }, [initial]);
+
+  // Photos are saved against the entry straight away, so they survive Cancel
+  // the same way they do on a plant sheet.
+  const syncPhotos = async (next) => {
+    const prev = photos;
+    setPhotos(next);
+    try {
+      await setJson(wishPhotoKey(f.id), next, false);
+      const cover = next.length ? await thumbFrom(next[0]) : "";
+      setF((cur) => ({ ...cur, photoCount: next.length, cover, bytes: JSON.stringify(next).length }));
+    } catch (e) {
+      setPhotos(prev);
+      if (flash) flash("Photos didn't save. Check your connection.");
+    }
+  };
+
+  const addPhotos = async (files) => {
+    setBusy(true);
+    try {
+      const added = [];
+      for (const file of Array.from(files)) added.push(await shrink(file, 1600, 0.82));
+      await syncPhotos([...(photos || []), ...added]);
+    } catch (e) {
+      if (flash) flash("Those images didn't load.");
+    }
+    setBusy(false);
+  };
 
   return (
     <Modal onClose={onCancel}>
@@ -1361,6 +1552,61 @@ function WishForm({ initial, onCancel, onSave, onDelete, onAcquire }) {
             style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
           />
         </Field>
+
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <span style={{ fontFamily: sans, fontSize: 12, color: C.moss }}>
+              Photos {photos ? `(${photos.length})` : ""}
+            </span>
+            <Btn tone="link" onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}>
+              {busy ? "Processing…" : "Add photos"}
+            </Btn>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length) addPhotos(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {photos === null ? (
+            <p style={{ fontFamily: sans, fontSize: 13, color: C.sage }}>Loading photos…</p>
+          ) : photos.length === 0 ? (
+            <p style={{ fontFamily: sans, fontSize: 13, color: C.sage }}>
+              Reference shots — the listing photo, or one you took in a shop. They come with it if you buy it.
+            </p>
+          ) : (
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {photos.map((src, i) => (
+                <div key={i} style={{ flexShrink: 0 }}>
+                  <img
+                    src={src}
+                    alt=""
+                    style={{
+                      width: 96,
+                      height: 120,
+                      objectFit: "cover",
+                      borderRadius: 2,
+                      border: i === 0 ? `2px solid ${C.moss}` : `1px solid ${C.rule}`,
+                    }}
+                  />
+                  <div className="flex justify-between" style={{ marginTop: 2 }}>
+                    {i !== 0 ? (
+                      <Btn tone="link" onClick={() => syncPhotos([src, ...photos.filter((_, j) => j !== i)])}>Cover</Btn>
+                    ) : (
+                      <span style={{ fontFamily: sans, fontSize: 11, color: C.moss, padding: "4px 2px" }}>Cover</span>
+                    )}
+                    <Btn tone="danger" onClick={() => syncPhotos(photos.filter((_, j) => j !== i))}>Remove</Btn>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 mt-2">
           <span className="flex gap-2">
