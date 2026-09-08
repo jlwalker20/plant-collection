@@ -70,10 +70,12 @@ export default function PublicGarden() {
                 marginBottom: 10,
               }}
             />
-            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 16, lineHeight: 1.2, color: C.ink }}>
+            <div style={{ fontFamily: sans, fontSize: 16, lineHeight: 1.25, color: C.ink }}>
+              {p.common || "Unnamed"}
+            </div>
+            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss, marginTop: 3 }}>
               {p.scientific || "Species unrecorded"}
             </div>
-            <div style={{ fontFamily: sans, fontSize: 13, marginTop: 3, color: C.ink }}>{p.common || "Unnamed"}</div>
             {showRooms && p.room && (
               <div style={{ fontFamily: sans, fontSize: 12, color: C.moss, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.rule}` }}>
                 {p.room}
@@ -92,10 +94,12 @@ export default function PublicGarden() {
           <div className="pg-detail w-full" style={{ maxWidth: 820, background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4 }}>
             <div className="flex items-start justify-between gap-4 mb-4">
               <div>
-                <h2 style={{ fontFamily: serif, fontStyle: "italic", fontSize: 24, margin: 0, color: C.ink }}>
-                  {open.scientific || "Species unrecorded"}
+                <h2 style={{ fontFamily: sans, fontSize: 24, margin: 0, color: C.ink }}>
+                  {open.common || "Unnamed"}
                 </h2>
-                <p style={{ fontFamily: sans, fontSize: 15, margin: "4px 0 0", color: C.ink }}>{open.common}</p>
+                <p style={{ fontFamily: serif, fontStyle: "italic", fontSize: 17, margin: "4px 0 0", color: C.moss }}>
+                  {open.scientific || "Species unrecorded"}
+                </p>
                 {open.added && (
                   <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "6px 0 0" }}>
                     In the collection since {fmtDate(open.added)}

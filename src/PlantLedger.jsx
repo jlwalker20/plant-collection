@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { getJson, setJson, delKey, requestPersistence } from "./storage.js";
 import { buildSnapshot, publish, unpublish } from "./publish.js";
+import { findOrphanedPhotos, migratePhotos } from "./migrate.js";
 
 /* ------------------------------------------------------------------ */
 /*  palette + type                                                     */
@@ -202,10 +203,7 @@ export default function PlantLedger({ account, onSignOut }) {
   const [plants, setPlants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
-  // Cards suit a phone; the ledger grid suits a wider screen.
-  const [view, setView] = useState(() =>
-    typeof window !== "undefined" && window.innerWidth < 640 ? "sheets" : "ledger"
-  );
+  const [view, setView] = useState("ledger");
   const [byRoom, setByRoom] = useState(false);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState({ key: "common", dir: 1 });
@@ -312,6 +310,14 @@ export default function PlantLedger({ account, onSignOut }) {
     }
     await persistWish(nextWish);
     flash("Thumbnails rebuilt.");
+  };
+
+  // Pulls photos left in this device's local storage by the pre-Supabase build
+  // up into the shared collection, then re-cuts covers from them.
+  const importLocalPhotos = async (onProgress) => {
+    const result = await migratePhotos(onProgress);
+    if (result.moved > 0) await rebuildThumbnails();
+    return result;
   };
 
   const upsertPlant = async (plant) => {
@@ -541,19 +547,6 @@ export default function PlantLedger({ account, onSignOut }) {
             style={{ ...inputStyle, width: 210 }}
           />
 
-          <div className="flex items-center gap-1 ml-auto">
-            <Btn tone="link" onClick={copyForSheet} disabled={section === "wishlist" ? !wishlist.length : !plants.length}>
-              Copy for Excel
-            </Btn>
-            <span style={{ color: C.rule }}>|</span>
-            <Btn
-              tone="link"
-              onClick={() => download(buildTable(","), section === "wishlist" ? "plant-wishlist.csv" : "plant-collection.csv", "text/csv")}
-              disabled={section === "wishlist" ? !wishlist.length : !plants.length}
-            >
-              Download CSV
-            </Btn>
-          </div>
         </div>
 
         {status && (
@@ -660,6 +653,13 @@ export default function PlantLedger({ account, onSignOut }) {
           onSignOut={onSignOut}
           publicCount={plants.filter((p) => p.publicOn).length}
           onRebuildThumbnails={rebuildThumbnails}
+          onImportLocalPhotos={importLocalPhotos}
+          exportLabel={section === "wishlist" ? "wishlist" : "collection"}
+          exportEmpty={section === "wishlist" ? !wishlist.length : !plants.length}
+          onCopyForSheet={copyForSheet}
+          onDownloadCsv={() =>
+            download(buildTable(","), section === "wishlist" ? "plant-wishlist.csv" : "plant-collection.csv", "text/csv")
+          }
           onPublish={async (opts) => {
             const snap = await buildSnapshot(plants, opts);
             await publish(snap);
@@ -724,18 +724,14 @@ function Ledger({ rows, sort, setSort, onOpen }) {
     { key: "common", label: "Common name" },
     { key: "scientific", label: "Scientific name" },
     { key: "acquired", label: "Added" },
-    { key: "location", label: "Room" },
     { key: "lastNote", label: "Last note" },
-    { key: "statusTag", label: "Latest status", sortable: false },
-    { key: "props", label: "Props" },
-    { key: "photoCount", label: "Photos" },
   ];
   const toggle = (k, sortable) =>
     sortable === false ? null : setSort((s) => (s.key === k ? { key: k, dir: -s.dir } : { key: k, dir: 1 }));
 
   return (
     <div style={{ overflowX: "auto", background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4 }}>
-      <table style={{ width: "100%", minWidth: 820, borderCollapse: "collapse" }}>
+      <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
         <thead>
           <tr>
             {cols.map((c) => (
@@ -775,21 +771,15 @@ function Ledger({ rows, sort, setSort, onOpen }) {
                     {p.common || "Unnamed"}
                   </span>
                 </td>
-                <td style={{ padding: "9px 13px", fontFamily: serif, fontStyle: "italic", fontSize: 15, color: C.moss }}>
+                <td style={{ padding: "9px 13px", fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss }}>
                   {p.scientific || "—"}
                 </td>
                 <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
                   {fmtDate(p.acquired)}
                 </td>
-                <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13 }}>{p.location || "—"}</td>
                 <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
                   {fmtDate(n ? n.date : "")}
                 </td>
-                <td style={{ padding: "9px 13px" }}>
-                  <Tag>{n ? n.tag : ""}</Tag>
-                </td>
-                <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, color: C.moss }}>{(p.props || []).length || ""}</td>
-                <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, color: C.moss }}>{p.photoCount || ""}</td>
               </tr>
             );
           })}
@@ -825,10 +815,12 @@ function Sheets({ rows, onOpen }) {
             >
               {!p.cover && <span style={{ fontFamily: sans, fontSize: 12, color: C.sage }}>No photo yet</span>}
             </div>
-            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 16, lineHeight: 1.2 }}>
+            <div style={{ fontFamily: sans, fontSize: 16, lineHeight: 1.25, color: C.ink }}>
+              {p.common || "Unnamed"}
+            </div>
+            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss, marginTop: 3 }}>
               {p.scientific || "Species unrecorded"}
             </div>
-            <div style={{ fontFamily: sans, fontSize: 13, marginTop: 3 }}>{p.common || "Unnamed"}</div>
             <div
               className="flex items-center justify-between gap-2"
               style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.rule}`, fontFamily: sans, fontSize: 12, color: C.moss }}
@@ -1290,13 +1282,21 @@ function PlantForm({ initial, onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublish, onUnpublish, onRebuildThumbnails, onClose, onBackup, onRestore }) {
+function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublish, onUnpublish, onRebuildThumbnails, onImportLocalPhotos, exportLabel, exportEmpty, onCopyForSheet, onDownloadCsv, onClose, onBackup, onRestore }) {
   const [restoreText, setRestoreText] = useState("");
   const [title, setTitle] = useState("The Living Collection");
   const [blurb, setBlurb] = useState("");
   const [showRooms, setShowRooms] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [orphans, setOrphans] = useState(null);
+  const [importing, setImporting] = useState("");
+
+  useEffect(() => {
+    findOrphanedPhotos()
+      .then((found) => setOrphans(found.length))
+      .catch(() => setOrphans(0));
+  }, []);
   const gardenUrl = `${window.location.origin}${window.location.pathname}#/garden`;
   const pct = Math.min(100, Math.round((usedBytes / SOFT_LIMIT) * 100));
 
@@ -1326,6 +1326,43 @@ function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublis
           which is well over a thousand pictures.
         </p>
 
+        {orphans > 0 && (
+          <div
+            className="mb-6"
+            style={{ border: `1px solid ${C.rule}`, borderRadius: 3, padding: "14px 16px", background: "#F3F1E4" }}
+          >
+            <p style={{ fontFamily: sans, fontSize: 13, color: C.ink, margin: "0 0 8px", lineHeight: 1.5 }}>
+              This device still holds {orphans} {orphans === 1 ? "set" : "sets"} of photos from before the collection
+              moved online. Backups don't include photos, so they were left behind here.
+            </p>
+            <Btn
+              tone="solid"
+              disabled={!!importing}
+              onClick={async () => {
+                setImporting("Starting…");
+                try {
+                  const result = await onImportLocalPhotos((done, total) => setImporting(`Uploading ${done} of ${total}…`));
+                  setImporting("");
+                  setOrphans(0);
+                  alert(
+                    result.moved > 0
+                      ? `Uploaded ${result.moved} ${result.moved === 1 ? "set" : "sets"} of photos to the shared collection.`
+                      : "Nothing needed uploading — those plants already have photos online."
+                  );
+                } catch (e) {
+                  setImporting("");
+                  alert("Upload failed partway. Check your connection and run it again — it picks up where it left off.");
+                }
+              }}
+            >
+              {importing || "Upload them to the shared collection"}
+            </Btn>
+            <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "8px 0 0" }}>
+              Run this on whichever phone had the photos. It never overwrites pictures already stored online.
+            </p>
+          </div>
+        )}
+
         <div className="mb-6">
           <Btn
             disabled={rebuilding}
@@ -1340,6 +1377,15 @@ function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublis
           <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "6px 0 0" }}>
             Re-cuts every cover image at full quality. Worth running once after an update that changes thumbnail size.
           </p>
+        </div>
+
+        <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Export</h3>
+        <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 10px" }}>
+          Takes whatever the {exportLabel} tab is currently showing, including any search or sort you've applied.
+        </p>
+        <div className="flex flex-wrap gap-2 items-center mb-6">
+          <Btn onClick={onCopyForSheet} disabled={exportEmpty}>Copy for Excel</Btn>
+          <Btn onClick={onDownloadCsv} disabled={exportEmpty}>Download CSV</Btn>
         </div>
 
         <h3 style={{ fontFamily: sans, fontSize: 13, color: C.moss, margin: "0 0 6px" }}>Public view</h3>
