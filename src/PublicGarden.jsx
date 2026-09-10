@@ -5,6 +5,26 @@ const C = { paper: "#EFF1EA", sheet: "#F8F9F4", ink: "#17251C", moss: "#3F5B41",
 const serif = "'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif";
 const sans = "'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif";
 
+// Same convention as the app: binomial italic, cultivar upright in quotes.
+function splitName(value) {
+  if (!value) return { scientific: "", cultivar: "" };
+  const m = String(value).match(/^(.*?)\s*['’"](.+)['’"]\s*$/);
+  if (m) return { scientific: m[1].trim(), cultivar: m[2].trim() };
+  return { scientific: String(value).trim(), cultivar: "" };
+}
+
+function SciName({ scientific, cultivar, size, color, showCultivar = true }) {
+  const parsed = cultivar ? { scientific, cultivar } : splitName(scientific);
+  return (
+    <span style={{ fontSize: size, color }}>
+      <span style={{ fontFamily: serif, fontStyle: "italic" }}>{parsed.scientific || "Species unrecorded"}</span>
+      {showCultivar && parsed.cultivar && (
+        <span style={{ fontFamily: serif, fontStyle: "normal" }}> &lsquo;{parsed.cultivar}&rsquo;</span>
+      )}
+    </span>
+  );
+}
+
 function fmtDate(d) {
   if (!d) return "";
   const p = String(d).split("-");
@@ -73,9 +93,14 @@ export default function PublicGarden() {
             <div style={{ fontFamily: sans, fontSize: 16, lineHeight: 1.25, color: C.ink }}>
               {p.common || "Unnamed"}
             </div>
-            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss, marginTop: 3 }}>
-              {p.scientific || "Species unrecorded"}
+            <div style={{ marginTop: 3 }}>
+              <SciName scientific={p.scientific} cultivar={p.cultivar} size={14} color={C.moss} showCultivar={false} />
             </div>
+            {(p.cultivar || splitName(p.scientific).cultivar) && (
+              <div style={{ fontFamily: sans, fontSize: 12.5, color: C.moss, marginTop: 2 }}>
+                &lsquo;{p.cultivar || splitName(p.scientific).cultivar}&rsquo;
+              </div>
+            )}
             {showRooms && p.room && (
               <div style={{ fontFamily: sans, fontSize: 12, color: C.moss, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.rule}` }}>
                 {p.room}
@@ -97,8 +122,8 @@ export default function PublicGarden() {
                 <h2 style={{ fontFamily: sans, fontSize: 24, margin: 0, color: C.ink }}>
                   {open.common || "Unnamed"}
                 </h2>
-                <p style={{ fontFamily: serif, fontStyle: "italic", fontSize: 17, margin: "4px 0 0", color: C.moss }}>
-                  {open.scientific || "Species unrecorded"}
+                <p style={{ margin: "4px 0 0" }}>
+                  <SciName scientific={open.scientific} cultivar={open.cultivar} size={17} color={C.moss} />
                 </p>
                 {open.added && (
                   <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "6px 0 0" }}>

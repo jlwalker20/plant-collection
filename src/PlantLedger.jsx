@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { getJson, setJson, delKey, requestPersistence } from "./storage.js";
 import { buildSnapshot, publish, unpublish } from "./publish.js";
 import { findOrphanedPhotos, migratePhotos } from "./migrate.js";
+import { lookupLocal, splitName } from "./names.js";
+import { lookupRemote } from "./taxa.js";
 
 /* ------------------------------------------------------------------ */
 /*  palette + type                                                     */
@@ -28,7 +30,7 @@ const SOFT_LIMIT = 400 * 1024 * 1024; // a courtesy warning, not a hard ceiling
 
 const PRIORITIES = ["Next purchase", "Watching", "Someday"];
 
-const STATUS_TAGS = ["Thriving", "New growth", "Watered", "Repotted", "Fertilized", "Pests", "Struggling", "Dormant"];
+const STATUS_TAGS = ["Thriving", "New growth", "Repotted", "Fertilized", "Pests", "Struggling", "Dormant"];
 
 /* ------------------------------------------------------------------ */
 /*  helpers                                                            */
@@ -47,6 +49,43 @@ function fmtDate(d) {
 function latestNote(p) {
   if (!p.notes || p.notes.length === 0) return null;
   return p.notes.slice().sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+}
+
+/**
+ * Watering gets typed constantly, so it accepts "9/7", "09/07" or "9-7" and
+ * works the year out: a date that would land in the future belongs to last
+ * year. Stored as a full ISO date so sorting stays correct across a new year.
+ */
+function parseMMDD(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  const m = raw.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?:\s*[\/\-.]\s*(\d{2,4}))?$/);
+  if (!m) return null; // not a shape we understand
+
+  const month = parseInt(m[1], 10);
+  const day = parseInt(m[2], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const now = new Date();
+  let year = now.getFullYear();
+  if (m[3]) {
+    year = parseInt(m[3], 10);
+    if (year < 100) year += 2000;
+  } else {
+    const candidate = new Date(year, month - 1, day);
+    if (candidate > now) year -= 1;
+  }
+
+  const d = new Date(year, month - 1, day);
+  if (d.getMonth() !== month - 1 || d.getDate() !== day) return null; // e.g. 2/30
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function fmtMMDD(iso) {
+  if (!iso) return "";
+  const p = String(iso).split("-");
+  if (p.length !== 3) return String(iso);
+  return `${parseInt(p[1], 10)}/${parseInt(p[2], 10)}`;
 }
 
 function fmtBytes(n) {
@@ -149,6 +188,24 @@ function Field({ label, children, hint }) {
   );
 }
 
+/**
+ * Botanical convention: the binomial is italic, the cultivar epithet upright
+ * inside single quotes. Older entries that hold both in one string are split
+ * on the fly so they render correctly too.
+ */
+function SciName({ scientific, cultivar, size = 14, color = C.moss, showCultivar = true }) {
+  const parsed = cultivar ? { scientific, cultivar } : splitName(scientific);
+  if (!parsed.scientific && !parsed.cultivar) return <>—</>;
+  return (
+    <span style={{ fontSize: size, color }}>
+      <span style={{ fontFamily: serif, fontStyle: "italic" }}>{parsed.scientific}</span>
+      {showCultivar && parsed.cultivar && (
+        <span style={{ fontFamily: serif, fontStyle: "normal" }}> &lsquo;{parsed.cultivar}&rsquo;</span>
+      )}
+    </span>
+  );
+}
+
 function Tag({ children }) {
   if (!children) return null;
   return (
@@ -225,6 +282,25 @@ export default function PlantLedger({ account, onSignOut }) {
       const wl = await getJson(WISH_KEY, false, []);
       setWishlist(Array.isArray(wl) ? wl : []);
       setLoading(false);
+
+      // Watering used to live in the journal. Lift the newest such entry into
+      // the new field so nothing is lost — the journal entries stay put.
+      if (Array.isArray(list) && list.length) {
+        let changed = false;
+        const lifted = list.map((p) => {
+          if (p.watered || !Array.isArray(p.notes)) return p;
+          const waterings = p.notes
+            .filter((n) => (n.tag || "").toLowerCase() === "watered")
+            .sort((a, b) => (a.date < b.date ? 1 : -1));
+          if (!waterings.length) return p;
+          changed = true;
+          return { ...p, watered: waterings[0].date };
+        });
+        if (changed) {
+          setPlants(lifted);
+          setJson(INDEX_KEY, lifted, false).catch(() => {});
+        }
+      }
     })();
   }, []);
 
@@ -262,6 +338,7 @@ export default function PlantLedger({ account, onSignOut }) {
       id: uid(),
       common: item.common,
       scientific: item.scientific,
+      cultivar: item.cultivar || "",
       acquired: today(),
       location: item.room || "",
       notes: item.notes ? [{ id: uid(), date: today(), tag: "", text: item.notes }] : [],
@@ -344,11 +421,14 @@ export default function PlantLedger({ account, onSignOut }) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = q
-      ? plants.filter((p) => [p.common, p.scientific, p.location].join(" ").toLowerCase().includes(q))
+      ? plants.filter((p) => [p.common, p.scientific, p.cultivar, p.location].join(" ").toLowerCase().includes(q))
       : plants.slice();
     const val = (p) => {
       if (sort.key === "lastNote") return latestNote(p) ? latestNote(p).date : "";
       if (sort.key === "props") return String((p.props || []).length).padStart(4, "0");
+      if (sort.key === "cultivar") return (p.cultivar || splitName(p.scientific).cultivar || "").toLowerCase();
+      if (sort.key === "watered") return p.watered || "";
+      if (sort.key === "scientific") return splitName(p.scientific).scientific.toLowerCase();
       return (p[sort.key] || "").toString().toLowerCase();
     };
     return list.sort((a, b) => {
@@ -390,7 +470,7 @@ export default function PlantLedger({ account, onSignOut }) {
   const wishRows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = q
-      ? wishlist.filter((w) => [w.common, w.scientific, w.room, w.source].join(" ").toLowerCase().includes(q))
+      ? wishlist.filter((w) => [w.common, w.scientific, w.cultivar, w.room, w.source].join(" ").toLowerCase().includes(q))
       : wishlist.slice();
     return list.sort((a, b) => {
       const ra = PRIORITIES.indexOf(a.priority || "Someday");
@@ -405,15 +485,17 @@ export default function PlantLedger({ account, onSignOut }) {
     let head;
     let body;
     if (section === "wishlist") {
-      head = ["Common name", "Scientific name", "First seen", "Where it would go", "Source or seller", "Priority", "Notes"];
-      body = wishRows.map((w) => [w.common || "", w.scientific || "", w.seen || "", w.room || "", w.source || "", w.priority || "", w.notes || ""]);
+      head = ["Common name", "Scientific name", "Cultivar", "First seen", "Where it would go", "Source or seller", "Priority", "Notes"];
+      body = wishRows.map((w) => [w.common || "", splitName(w.scientific).scientific || "", w.cultivar || splitName(w.scientific).cultivar || "", w.seen || "", w.room || "", w.source || "", w.priority || "", w.notes || ""]);
     } else {
-      head = ["Common name", "Scientific name", "Date added", "Room", "Last care note", "Latest status", "Propagations", "Photos"];
+      head = ["Common name", "Scientific name", "Cultivar", "Last watered", "Date added", "Room", "Last care note", "Latest status", "Propagations", "Photos"];
       body = filtered.map((p) => {
         const n = latestNote(p);
         return [
           p.common || "",
-          p.scientific || "",
+          splitName(p.scientific).scientific || "",
+          p.cultivar || splitName(p.scientific).cultivar || "",
+          p.watered || "",
           p.acquired || "",
           p.location || "",
           n ? n.date : "",
@@ -720,9 +802,13 @@ function Empty({ onAdd, shared }) {
 
 /* ------------------------------------------------------------------ */
 function Ledger({ rows, sort, setSort, onOpen }) {
+  // A blank column helps nobody, so it only appears if something in view has one.
+  const anyCultivar = rows.some((p) => (p.cultivar || splitName(p.scientific).cultivar));
   const cols = [
     { key: "common", label: "Common name" },
     { key: "scientific", label: "Scientific name" },
+    ...(anyCultivar ? [{ key: "cultivar", label: "Cultivar" }] : []),
+    { key: "watered", label: "Watered" },
     { key: "acquired", label: "Added" },
     { key: "lastNote", label: "Last note" },
   ];
@@ -731,7 +817,7 @@ function Ledger({ rows, sort, setSort, onOpen }) {
 
   return (
     <div style={{ overflowX: "auto", background: C.sheet, border: `1px solid ${C.rule}`, borderRadius: 4 }}>
-      <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
+      <table style={{ width: "100%", minWidth: anyCultivar ? 720 : 600, borderCollapse: "collapse" }}>
         <thead>
           <tr>
             {cols.map((c) => (
@@ -771,8 +857,16 @@ function Ledger({ rows, sort, setSort, onOpen }) {
                     {p.common || "Unnamed"}
                   </span>
                 </td>
-                <td style={{ padding: "9px 13px", fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss }}>
-                  {p.scientific || "—"}
+                <td style={{ padding: "9px 13px" }}>
+                  <SciName scientific={p.scientific} cultivar={p.cultivar} showCultivar={false} />
+                </td>
+                {anyCultivar && (
+                  <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, color: C.moss }}>
+                    {p.cultivar || splitName(p.scientific).cultivar || ""}
+                  </td>
+                )}
+                <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
+                  {fmtMMDD(p.watered) || "—"}
                 </td>
                 <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
                   {fmtDate(p.acquired)}
@@ -818,9 +912,18 @@ function Sheets({ rows, onOpen }) {
             <div style={{ fontFamily: sans, fontSize: 16, lineHeight: 1.25, color: C.ink }}>
               {p.common || "Unnamed"}
             </div>
-            <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss, marginTop: 3 }}>
-              {p.scientific || "Species unrecorded"}
+            <div style={{ marginTop: 3 }}>
+              {p.scientific ? (
+                <SciName scientific={p.scientific} cultivar={p.cultivar} showCultivar={false} />
+              ) : (
+                <span style={{ fontFamily: serif, fontStyle: "italic", fontSize: 14, color: C.moss }}>Species unrecorded</span>
+              )}
             </div>
+            {(p.cultivar || splitName(p.scientific).cultivar) && (
+              <div style={{ fontFamily: sans, fontSize: 12.5, color: C.moss, marginTop: 2 }}>
+                &lsquo;{p.cultivar || splitName(p.scientific).cultivar}&rsquo;
+              </div>
+            )}
             <div
               className="flex items-center justify-between gap-2"
               style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.rule}`, fontFamily: sans, fontSize: 12, color: C.moss }}
@@ -889,6 +992,7 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
       id: uid(),
       common: plant.common ? `${plant.common} (prop)` : "Propagation",
       scientific: plant.scientific || "",
+      cultivar: plant.cultivar || "",
       acquired: pr.started,
       location: plant.location || "",
       notes: [{ id: uid(), date: today(), tag: "New growth", text: `Potted up from ${pr.method} started ${fmtDate(pr.started)} off the parent plant.` }],
@@ -906,8 +1010,12 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
       <div style={{ padding: "20px 22px 24px" }}>
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 style={{ fontFamily: serif, fontStyle: "italic", fontSize: 25, margin: 0, lineHeight: 1.15 }}>
-              {plant.scientific || "Species unrecorded"}
+            <h2 style={{ margin: 0, lineHeight: 1.15 }}>
+              {plant.scientific ? (
+                <SciName scientific={plant.scientific} cultivar={plant.cultivar} size={25} color={C.ink} />
+              ) : (
+                <span style={{ fontFamily: serif, fontStyle: "italic", fontSize: 25 }}>Species unrecorded</span>
+              )}
             </h2>
             <p style={{ fontFamily: sans, fontSize: 15, margin: "4px 0 0" }}>
               {plant.common || "Unnamed"}
@@ -919,8 +1027,15 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
 
         {/* the three actions, right under the name */}
         <div className="flex flex-wrap gap-2" style={{ margin: "16px 0 4px" }}>
+          <Btn
+            tone="solid"
+            onClick={() => onPatch({ watered: today() })}
+            title="Sets today's date on the watering field"
+          >
+            {plant.watered === today() ? "Watered today ✓" : "Watered today"}
+          </Btn>
           <Btn onClick={onEdit}>Edit details</Btn>
-          <Btn tone="solid" onClick={() => setPanel("care")}>Care entry</Btn>
+          <Btn onClick={() => setPanel("care")}>Care entry</Btn>
           <Btn onClick={() => setPanel("prop")}>New prop</Btn>
         </div>
 
@@ -938,6 +1053,10 @@ function PlantSheet({ plant, shared, usedBytes, onClose, onEdit, onDelete, onPat
           <div>
             <dt style={{ fontSize: 12, color: C.moss }}>Date added</dt>
             <dd style={{ margin: 0 }}>{fmtDate(plant.acquired)}</dd>
+          </div>
+          <div>
+            <dt style={{ fontSize: 12, color: C.moss }}>Last watered</dt>
+            <dd style={{ margin: 0 }}>{plant.watered ? fmtDate(plant.watered) : "—"}</dd>
           </div>
           <div>
             <dt style={{ fontSize: 12, color: C.moss }}>Room</dt>
@@ -1227,12 +1346,98 @@ function PropForm({ onCancel, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  scientific name suggestions from a common name                     */
+/* ------------------------------------------------------------------ */
+function NameSuggestions({ common, onPick }) {
+  const [local, setLocal] = useState([]);
+  const [remote, setRemote] = useState([]);
+  const [state, setState] = useState("idle"); // idle | looking | done | failed
+
+  useEffect(() => {
+    const q = (common || "").trim();
+    setLocal(lookupLocal(q));
+
+    if (q.length < 3) {
+      setRemote([]);
+      setState("idle");
+      return;
+    }
+
+    // Wait for a pause in typing before troubling the network.
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setState("looking");
+      try {
+        setRemote(await lookupRemote(q, controller.signal));
+        setState("done");
+      } catch (e) {
+        if (e.name !== "AbortError") {
+          setRemote([]);
+          setState("failed");
+        }
+      }
+    }, 600);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [common]);
+
+  // The curated list wins on ties — it knows the trade names.
+  const known = new Set(local.map((l) => l.scientific.toLowerCase()));
+  const merged = [...local, ...remote.filter((r) => !known.has(r.scientific.toLowerCase()))].slice(0, 8);
+
+  if (merged.length === 0) {
+    if (state === "looking") {
+      return <p style={{ fontFamily: sans, fontSize: 12, color: C.sage, margin: "-10px 0 14px" }}>Looking…</p>;
+    }
+    return null;
+  }
+
+  return (
+    <div style={{ margin: "-10px 0 16px" }}>
+      <p style={{ fontFamily: sans, fontSize: 12, color: C.moss, margin: "0 0 6px" }}>
+        Suggestions — tap one to use it, or type your own:
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {merged.map((m) => (
+          <button
+            key={m.scientific}
+            type="button"
+            onClick={() => onPick(splitName(m.scientific))}
+            style={{
+              fontFamily: serif,
+              fontStyle: "italic",
+              fontSize: 14,
+              color: C.ink,
+              background: C.sheet,
+              border: `1px solid ${m.source === "list" ? C.moss : C.rule}`,
+              borderRadius: 3,
+              padding: "5px 10px",
+              cursor: "pointer",
+            }}
+            title={m.source === "list" ? "From the houseplant list" : `From iNaturalist${m.common ? ` — ${m.common}` : ""}`}
+          >
+            <SciName scientific={m.scientific} size={14} color={C.ink} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 function PlantForm({ initial, onCancel, onSave }) {
+  const [wateredText, setWateredText] = useState(initial ? fmtMMDD(initial.watered) : "");
+  const [wateredBad, setWateredBad] = useState(false);
   const [f, setF] = useState(
     initial || {
       id: uid(),
       common: "",
       scientific: "",
+      cultivar: "",
+      watered: "",
       acquired: today(),
       location: "",
       notes: [],
@@ -1259,6 +1464,49 @@ function PlantForm({ initial, onCancel, onSave }) {
             style={{ ...inputStyle, fontFamily: serif, fontStyle: "italic", fontSize: 15 }}
           />
         </Field>
+        <NameSuggestions common={f.common} onPick={(n) => setF({ ...f, scientific: n.scientific, cultivar: n.cultivar || f.cultivar })} />
+        <Field label="Cultivar or variety" hint="optional">
+          <input
+            value={f.cultivar || ""}
+            onChange={set("cultivar")}
+            placeholder="Thai Constellation"
+            style={inputStyle}
+          />
+        </Field>
+        <Field label="Last watered" hint="MM/DD">
+          <div className="flex gap-2 items-center">
+            <input
+              value={wateredText}
+              onChange={(e) => {
+                const text = e.target.value;
+                setWateredText(text);
+                const iso = parseMMDD(text);
+                if (iso === null) {
+                  setWateredBad(true);
+                } else {
+                  setWateredBad(false);
+                  setF((cur) => ({ ...cur, watered: iso }));
+                }
+              }}
+              placeholder="9/7"
+              inputMode="numeric"
+              style={{ ...inputStyle, width: 110, fontVariantNumeric: "tabular-nums" }}
+            />
+            <Btn
+              onClick={() => {
+                setF((cur) => ({ ...cur, watered: today() }));
+                setWateredText(fmtMMDD(today()));
+                setWateredBad(false);
+              }}
+            >
+              Today
+            </Btn>
+            {wateredBad && (
+              <span style={{ fontFamily: sans, fontSize: 12, color: C.warn }}>Use MM/DD</span>
+            )}
+          </div>
+        </Field>
+
         <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))" }}>
           <Field label="Date added" hint="when it joined the collection">
             <input type="date" value={f.acquired} onChange={set("acquired")} style={inputStyle} />
@@ -1468,6 +1716,17 @@ function Settings({ plants, usedBytes, account, onSignOut, publicCount, onPublis
           <Btn tone="danger" onClick={doRestore} disabled={!restoreText.trim()}>Replace collection with this backup</Btn>
           <Btn onClick={onClose}>Done</Btn>
         </div>
+
+        <p style={{ fontFamily: sans, fontSize: 11, color: C.sage, margin: "22px 0 0", paddingTop: 14, borderTop: `1px solid ${C.rule}`, lineHeight: 1.6 }}>
+          App icon: Monstera Leaf by Arif Arisandi from{" "}
+          <a href="https://thenounproject.com/browse/icons/term/monstera-leaf/" target="_blank" rel="noopener noreferrer" style={{ color: C.label }}>
+            Noun Project
+          </a>{" "}
+          (CC BY 3.0). Scientific name suggestions draw on{" "}
+          <a href="https://www.inaturalist.org" target="_blank" rel="noopener noreferrer" style={{ color: C.label }}>
+            iNaturalist
+          </a>.
+        </p>
       </div>
     </Modal>
   );
@@ -1526,8 +1785,8 @@ function Wishlist({ rows, onEdit, onAcquire }) {
               <td onClick={() => onEdit(w)} style={{ padding: "9px 13px", fontFamily: sans, fontSize: 14, cursor: "pointer" }}>
                 {w.common || "Unnamed"}
               </td>
-              <td onClick={() => onEdit(w)} style={{ padding: "9px 13px", fontFamily: serif, fontStyle: "italic", fontSize: 15, color: C.moss, cursor: "pointer" }}>
-                {w.scientific || "—"}
+              <td onClick={() => onEdit(w)} style={{ padding: "9px 13px", cursor: "pointer" }}>
+                <SciName scientific={w.scientific} cultivar={w.cultivar} size={15} />
               </td>
               <td style={{ padding: "9px 13px", fontFamily: sans, fontSize: 13, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
                 {fmtDate(w.seen)}
@@ -1554,7 +1813,7 @@ function Wishlist({ rows, onEdit, onAcquire }) {
 /* ------------------------------------------------------------------ */
 function WishForm({ initial, onCancel, onSave, onDelete, onAcquire, flash }) {
   const [f, setF] = useState(
-    initial || { id: uid(), common: "", scientific: "", seen: today(), room: "", source: "", priority: "Someday", notes: "", photoCount: 0, cover: "", bytes: 0 }
+    initial || { id: uid(), common: "", scientific: "", cultivar: "", seen: today(), room: "", source: "", priority: "Someday", notes: "", photoCount: 0, cover: "", bytes: 0 }
   );
   const [photos, setPhotos] = useState(initial ? null : []);
   const [busy, setBusy] = useState(false);
@@ -1614,6 +1873,10 @@ function WishForm({ initial, onCancel, onSave, onDelete, onAcquire, flash }) {
             placeholder="Philodendron mamei"
             style={{ ...inputStyle, fontFamily: serif, fontStyle: "italic", fontSize: 15 }}
           />
+        </Field>
+        <NameSuggestions common={f.common} onPick={(n) => setF({ ...f, scientific: n.scientific, cultivar: n.cultivar || f.cultivar })} />
+        <Field label="Cultivar or variety" hint="optional">
+          <input value={f.cultivar || ""} onChange={set("cultivar")} placeholder="Albo Variegata" style={inputStyle} />
         </Field>
 
         <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>

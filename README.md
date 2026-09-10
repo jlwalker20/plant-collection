@@ -172,3 +172,13 @@ vite.config.js        build config and PWA manifest
 public/               app icons
 .github/workflows/    Pages deploy, Supabase keep-alive, nightly backup
 ```
+
+## Credits
+
+App icon: Monstera Leaf by Arif Arisandi from
+[Noun Project](https://thenounproject.com/browse/icons/term/monstera-leaf/),
+licensed CC BY 3.0. The attribution appears in the app under Settings and in
+the footer of the site's landing page; keep it there if you reuse the icon.
+
+Scientific name suggestions use the [iNaturalist](https://api.inaturalist.org)
+public API alongside a curated houseplant list in `src/names.js`.

@@ -43,6 +43,7 @@ export async function buildSnapshot(plants, options) {
       id: p.id,
       common: p.common || "",
       scientific: p.scientific || "",
+      cultivar: p.cultivar || "",
       added: p.acquired || "",
       room: showRooms ? p.location || "" : "",
       photos,
