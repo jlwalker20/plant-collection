@@ -1,0 +1,54 @@
+# Nightly backup of the collection.
+#
+# The free Supabase tier keeps no backups of its own. This pulls everything
+# except the photo rows and commits it, so git history gives you a restorable
+# snapshot for every day it changed.
+#
+# NOTE: your repo is public, because that's what GitHub Pages needs on a free
+# account. So these backups are public too — plant names, rooms, dates, care
+# notes, wishlist sources. That's usually fine for a plant catalogue, but if
+# you'd rather it weren't, delete this workflow and use Settings → Download
+# backup by hand instead.
+#
+# Photos are deliberately excluded: they'd add hundreds of megabytes to the
+# repository and git would keep every version forever.
+name: Back up the collection
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export from Supabase
+        env:
+          URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          mkdir -p backups
+          curl -sS --fail \
+            "$URL/rest/v1/collection_kv?select=key,value,updated_at&key=not.like.plantdex:photos:*&key=not.like.plantdex:wishphotos:*" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -o backups/collection-latest.json
+          python3 -m json.tool backups/collection-latest.json > /dev/null
+
+      - name: Commit if anything changed
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          if git diff --quiet backups/; then
+            echo "Nothing changed today."
+          else
+            git add backups/
+            git commit -m "Backup $(date -u +%Y-%m-%d)"
+            git push
+          fi

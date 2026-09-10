@@ -1,0 +1,56 @@
+# Builds the app and publishes it to GitHub Pages on every push to main.
+# You don't need Node or any tooling on your own machine — GitHub does the build.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # lets you trigger a rebuild by hand from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Pages serves the site from /<repo-name>/, so the build needs that prefix.
+      # Taken from the repo name automatically — nothing to edit.
+      - run: npm run build
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+          # Set these in Settings → Secrets and variables → Actions.
+          # The anon key is meant to ship in the browser bundle; Row Level
+          # Security is what actually protects the data.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
